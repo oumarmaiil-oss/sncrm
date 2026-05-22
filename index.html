@@ -927,8 +927,18 @@
         let touchStartY = 0;
         let currentSwipeWrapper = null;
 
+        // --- NOUVEAU : Variables pour la capture GPS optimale ---
+        let geoWatcherId = null;
+        let bestLocation = null;
+
+        function stopGeolocationTracking() {
+            if (geoWatcherId !== null && navigator.geolocation) {
+                navigator.geolocation.clearWatch(geoWatcherId);
+                geoWatcherId = null;
+            }
+        }
+
         function initCRM() {
-            // Changement de clé pour forcer le nettoyage du cache lors du premier lancement avec ce nouveau code
             const cache = localStorage.getItem('atlasta_crm_v6_state');
             if (cache) { 
                 state = JSON.parse(cache);
@@ -1145,6 +1155,26 @@
         function launchCLMViewerAfterPreCall() {
             if(precallSelectedArray.length === 0) { alert("Sélectionnez au moins une molécule pour engager le Call."); return; }
             closeModal('modal-pre-call-clm');
+
+            // --- NOUVELLE LOGIQUE : Démarrage du tracking GPS continu ---
+            bestLocation = null;
+            if (navigator.geolocation) {
+                geoWatcherId = navigator.geolocation.watchPosition(
+                    (position) => {
+                        const acc = position.coords.accuracy;
+                        // Ne retient que la position la plus précise trouvée
+                        if (!bestLocation || acc < bestLocation.accuracy) {
+                            bestLocation = {
+                                latitude: position.coords.latitude,
+                                longitude: position.coords.longitude,
+                                accuracy: acc
+                            };
+                        }
+                    },
+                    (error) => { console.log("Recherche GPS continue :", error); },
+                    { enableHighAccuracy: true, maximumAge: 0 }
+                );
+            }
             
             const visit = state.planning.J2.find(v => v.id === state.activeWorkingVisitId);
             const p = state.prospects.find(pro => pro.id === visit.prospectId);
@@ -1205,6 +1235,7 @@
                 clearInterval(clmTimerInterval);
                 currentActiveClmProductIndex = null;
                 document.getElementById('modal-clm-viewer').style.display = 'none';
+                stopGeolocationTracking(); // Annulation : arrêt du tracking
             }
         }
 
@@ -1248,12 +1279,12 @@
             });
         }
 
-        // ==================== SOUMISSION DU CRV AVEC TIMEOUT GPS 5s ====================
+        // ==================== SOUMISSION DU CRV AVEC TIMEOUT GPS 3s ====================
         
         async function submitVisitReport(e) {
             e.preventDefault();
             const submitBtn = document.getElementById('btn-submit-report-form');
-            submitBtn.innerText = "Enregistrement...";
+            submitBtn.innerText = "Enregistrement en cours...";
             submitBtn.disabled = true;
 
             const visitId = parseInt(document.getElementById('form-report-visit-id').value);
@@ -1264,21 +1295,31 @@
             const selectedProducts = [];
             document.querySelectorAll('input[name="prod"]:checked').forEach(chk => selectedProducts.push(chk.value));
 
+            // --- NOUVELLE LOGIQUE : Fin du tracking continu ---
+            stopGeolocationTracking();
+
+            // --- NOUVELLE LOGIQUE : Délai pro de 3 secondes avant validation ---
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
             // Coordonnées par défaut sur Dakar (Fallback)
             let coords = { latitude: 14.6934, longitude: -17.4479 };
             let gpsValid = true;
 
-            // Fixation du Timeout à 5 secondes pour laisser l'antenne chercher
-            if (navigator.geolocation) {
-                try {
-                    const pos = await new Promise((res, rej) => navigator.geolocation.getCurrentPosition(res, rej, {timeout:5000, enableHighAccuracy: false}));
-                    coords = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
-                } catch(err) { 
-                    console.log("Timeout ou refus GPS de 5s, utilisation fallback."); 
-                    gpsValid = false; // Flag pour l'affichage visuel "Echec GPS"
-                }
+            // --- NOUVELLE LOGIQUE : Récupération de la meilleure donnée capturée ---
+            if (bestLocation) {
+                coords = { latitude: bestLocation.latitude, longitude: bestLocation.longitude };
             } else {
-                gpsValid = false;
+                // Tentative ultime si rien n'a été capturé durant toute la présentation (GPS désactivé puis réactivé)
+                if (navigator.geolocation) {
+                    try {
+                        const pos = await new Promise((res, rej) => navigator.geolocation.getCurrentPosition(res, rej, {timeout:2000, enableHighAccuracy: false}));
+                        coords = { latitude: pos.coords.latitude, longitude: pos.coords.longitude };
+                    } catch(err) { 
+                        gpsValid = false;
+                    }
+                } else {
+                    gpsValid = false;
+                }
             }
 
             const now = new Date();
@@ -1691,7 +1732,10 @@
             });
         }
 
-        function closeModal(id) { document.getElementById(id).style.display = 'none'; }
+        function closeModal(id) { 
+            document.getElementById(id).style.display = 'none'; 
+            if(id === 'modal-visit-report') stopGeolocationTracking(); // Sécurité arrêt GPS en cas d'annulation manuelle
+        }
         function closeModalOnOuterClick(e, modalId) { if (e.target === document.getElementById(modalId)) closeModal(modalId); }
         function createHTMLElement(html) { const div = document.createElement('div'); div.innerHTML = html.trim(); return div.firstChild; }
         function syncUI() { handleDayTabClick('J2'); changeView('planning'); }

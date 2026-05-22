@@ -736,7 +736,6 @@
 <div class="macro-actions-bar" id="macro-actions-container"></div>
 
 <div class="main-scroll-content" id="main-scroll-viewport">
-
     <div id="celebration-zone" style="display: none;"></div>
 
     <section id="view-planning" class="view active">
@@ -854,7 +853,6 @@
             © 2026 Docteur Oumar Sow. Tous droits réservés. Standard International.
         </p>
     </section>
-
 </div>
 
 <nav>
@@ -1072,6 +1070,10 @@
         "Oméprazole", "Amlodipine", "Ramipril", "Salbutamol", "Azithromycine"
     ];
 
+    const GPS_WAIT_MS = 5000;
+    const GPS_TARGET_ACCURACY_M = 200;
+    const GPS_FALLBACK_COORDS = { latitude: 14.6934, longitude: -17.4479 };
+
     const CLM_PRODUCTS_DATA = [
         { name: "Amoxicilline", slides: [
             { title: "Amoxicilline 1g - Introduction", desc: "<b>Antibiotique de 1ère intention</b><br><br>Traitement de choix contre les infections respiratoires hautes et basses communautaires." },
@@ -1164,19 +1166,26 @@
 
         geoWatcherId = navigator.geolocation.watchPosition(
             (position) => {
-                const acc = typeof position.coords.accuracy === 'number' ? position.coords.accuracy : Number.POSITIVE_INFINITY;
-                if (!bestLocation || acc < bestLocation.accuracy) {
+                const accuracy = typeof position.coords.accuracy === 'number'
+                    ? position.coords.accuracy
+                    : Number.POSITIVE_INFINITY;
+
+                if (
+                    !bestLocation ||
+                    accuracy < bestLocation.accuracy ||
+                    (bestLocation.accuracy > GPS_TARGET_ACCURACY_M && accuracy <= GPS_TARGET_ACCURACY_M)
+                ) {
                     bestLocation = {
                         latitude: position.coords.latitude,
                         longitude: position.coords.longitude,
-                        accuracy: acc
+                        accuracy
                     };
                 }
             },
             (error) => {
                 console.log("GPS tracking error:", error);
             },
-            { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+            { enableHighAccuracy: true, maximumAge: 0, timeout: GPS_WAIT_MS }
         );
     }
 
@@ -1225,18 +1234,18 @@
         }
 
         const todayPoints = extractTodayGeoPointsFromPlanning();
-        if (todayPoints.length > 0) {
-            const merged = [];
-            const seen = new Set();
+        const merged = [];
+        const seen = new Set();
 
-            todayPoints.forEach(pt => {
-                const key = geoPointKey(pt);
-                if (!seen.has(key)) {
-                    seen.add(key);
-                    merged.push(pt);
-                }
-            });
+        todayPoints.forEach(pt => {
+            const key = geoPointKey(pt);
+            if (!seen.has(key)) {
+                seen.add(key);
+                merged.push(pt);
+            }
+        });
 
+        if (merged.length > 0) {
             state.trackingDay.geolocs = merged;
             state.trackingDay.firstReportTime = merged[0]?.timestamp || null;
             state.trackingDay.lastReportTime = merged[merged.length - 1]?.timestamp || null;
@@ -1273,7 +1282,7 @@
         return points;
     }
 
-    function getQuickGeolocation(timeoutMs = 1500) {
+    function getQuickGeolocation(timeoutMs = GPS_WAIT_MS) {
         return new Promise((resolve) => {
             if (!navigator.geolocation) {
                 resolve(null);
@@ -1291,29 +1300,43 @@
             navigator.geolocation.getCurrentPosition(
                 (pos) => done(pos),
                 () => done(null),
-                { enableHighAccuracy: false, maximumAge: 3000, timeout: timeoutMs }
+                { enableHighAccuracy: true, maximumAge: 0, timeout: timeoutMs }
             );
 
             setTimeout(() => done(null), timeoutMs + 100);
         });
     }
 
-    async function resolveFinalGeolocation() {
-        const fallback = { latitude: 14.6934, longitude: -17.4479 };
+    async function collectFinalGeolocation() {
+        const startedAt = Date.now();
 
-        if (bestLocation) {
-            return {
-                coords: {
-                    latitude: bestLocation.latitude,
-                    longitude: bestLocation.longitude
-                },
-                accuracy: bestLocation.accuracy,
-                gpsValid: true,
-                source: 'watch'
-            };
+        const checkBest = () => {
+            if (bestLocation && Number.isFinite(bestLocation.accuracy) && bestLocation.accuracy <= GPS_TARGET_ACCURACY_M) {
+                return {
+                    coords: {
+                        latitude: bestLocation.latitude,
+                        longitude: bestLocation.longitude
+                    },
+                    accuracy: bestLocation.accuracy,
+                    gpsValid: true,
+                    source: 'watch-good'
+                };
+            }
+            return null;
+        };
+
+        const immediate = checkBest();
+        if (immediate) return immediate;
+
+        const oneShotPromise = getQuickGeolocation(GPS_WAIT_MS);
+
+        while (Date.now() - startedAt < GPS_WAIT_MS) {
+            const ready = checkBest();
+            if (ready) return ready;
+            await new Promise(r => setTimeout(r, 150));
         }
 
-        const pos = await getQuickGeolocation(1500);
+        const pos = await oneShotPromise;
         if (pos && pos.coords && typeof pos.coords.latitude === 'number' && typeof pos.coords.longitude === 'number') {
             return {
                 coords: {
@@ -1322,12 +1345,24 @@
                 },
                 accuracy: typeof pos.coords.accuracy === 'number' ? pos.coords.accuracy : null,
                 gpsValid: true,
-                source: 'current_position'
+                source: 'current-position'
+            };
+        }
+
+        if (bestLocation) {
+            return {
+                coords: {
+                    latitude: bestLocation.latitude,
+                    longitude: bestLocation.longitude
+                },
+                accuracy: bestLocation.accuracy,
+                gpsValid: bestLocation.accuracy <= GPS_TARGET_ACCURACY_M,
+                source: 'watch-fallback'
             };
         }
 
         return {
-            coords: fallback,
+            coords: GPS_FALLBACK_COORDS,
             accuracy: null,
             gpsValid: false,
             source: 'fallback'
@@ -1725,7 +1760,7 @@
             const selectedProducts = [];
             document.querySelectorAll('input[name="prod"]:checked').forEach(chk => selectedProducts.push(chk.value));
 
-            const finalGeo = await resolveFinalGeolocation();
+            const finalGeo = await collectFinalGeolocation();
             stopGeolocationTracking();
 
             const now = new Date();
@@ -1750,10 +1785,9 @@
             const p = state.prospects.find(pro => pro.id === visit.prospectId);
             if (p && memoText) p.memo = memoText;
 
-            normalizeTrackingDay();
-            if (!state.trackingDay.firstReportTime) state.trackingDay.firstReportTime = timestampStr;
-            state.trackingDay.lastReportTime = timestampStr;
+            if (!state.trackingDay) state.trackingDay = { firstReportTime: null, lastReportTime: null, firstGeoloc: null, geolocs: [] };
             if (!Array.isArray(state.trackingDay.geolocs)) state.trackingDay.geolocs = [];
+
             state.trackingDay.geolocs.push({
                 visitId,
                 prospectId: visit.prospectId,
@@ -1764,8 +1798,8 @@
                 gpsValid: finalGeo.gpsValid,
                 gpsSource: finalGeo.source
             });
-            normalizeTrackingDay();
 
+            normalizeTrackingDay();
             saveCRMState();
             submitBtn.innerText = "Valider le CRV";
             submitBtn.disabled = false;
@@ -2202,7 +2236,7 @@
                     <strong>${labelName}</strong><br>
                     ${pt.timestamp ? `Heure : ${pt.timestamp}<br>` : ''}
                     ${typeof pt.accuracy === 'number' ? `Précision : ${Math.round(pt.accuracy)} m<br>` : ''}
-                    ${isValid ? 'Position GPS validée' : 'Position estimée (fallback)<br>'}
+                    ${isValid ? 'Position GPS validée<br>' : 'Position estimée (fallback)<br>'}
                     ${pt.latitude.toFixed(5)}, ${pt.longitude.toFixed(5)}
                 </div>
             `;

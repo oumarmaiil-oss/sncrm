@@ -736,6 +736,7 @@
 <div class="macro-actions-bar" id="macro-actions-container"></div>
 
 <div class="main-scroll-content" id="main-scroll-viewport">
+
     <div id="celebration-zone" style="display: none;"></div>
 
     <section id="view-planning" class="view active">
@@ -764,7 +765,7 @@
             <div class="dash-section-title">Sectorisation (Rayon 500m)</div>
             <div id="map-container">
                 <div class="map-placeholder" id="map-fallback">
-                    En attente de la première validation de CRV chez le praticien.
+                    Aucune géolocalisation validée sur J2 pour le moment.
                 </div>
             </div>
 
@@ -853,6 +854,7 @@
             © 2026 Docteur Oumar Sow. Tous droits réservés. Standard International.
         </p>
     </section>
+
 </div>
 
 <nav>
@@ -1178,7 +1180,100 @@
         );
     }
 
-    function getCurrentPositionQuick(timeoutMs = 1500) {
+    function timeToMinutes(value) {
+        if (typeof value !== 'string') return Number.MAX_SAFE_INTEGER;
+        const match = value.match(/^(\d{1,2}):(\d{2})$/);
+        if (!match) return Number.MAX_SAFE_INTEGER;
+        return (parseInt(match[1], 10) * 60) + parseInt(match[2], 10);
+    }
+
+    function geoPointKey(point) {
+        return [
+            point.visitId || '',
+            point.timestamp || '',
+            point.latitude || '',
+            point.longitude || ''
+        ].join('|');
+    }
+
+    function extractTodayGeoPointsFromPlanning() {
+        const points = [];
+        (state.planning.J2 || []).forEach(v => {
+            if (v.status === 'completed' && v.report && v.report.geoloc) {
+                points.push({
+                    visitId: v.id,
+                    prospectId: v.prospectId,
+                    timestamp: v.report.timestamp || null,
+                    latitude: v.report.geoloc.latitude,
+                    longitude: v.report.geoloc.longitude,
+                    accuracy: typeof v.report.gpsAccuracy === 'number' ? v.report.gpsAccuracy : null,
+                    gpsValid: v.report.gpsValid !== false,
+                    gpsSource: v.report.gpsSource || 'legacy'
+                });
+            }
+        });
+        points.sort((a, b) => timeToMinutes(a.timestamp) - timeToMinutes(b.timestamp));
+        return points;
+    }
+
+    function normalizeTrackingDay() {
+        if (!state.trackingDay || typeof state.trackingDay !== 'object') {
+            state.trackingDay = { firstReportTime: null, lastReportTime: null, firstGeoloc: null, geolocs: [] };
+        }
+        if (!Array.isArray(state.trackingDay.geolocs)) {
+            state.trackingDay.geolocs = [];
+        }
+
+        const todayPoints = extractTodayGeoPointsFromPlanning();
+        if (todayPoints.length > 0) {
+            const merged = [];
+            const seen = new Set();
+
+            todayPoints.forEach(pt => {
+                const key = geoPointKey(pt);
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    merged.push(pt);
+                }
+            });
+
+            state.trackingDay.geolocs = merged;
+            state.trackingDay.firstReportTime = merged[0]?.timestamp || null;
+            state.trackingDay.lastReportTime = merged[merged.length - 1]?.timestamp || null;
+            state.trackingDay.firstGeoloc = merged[0]
+                ? { latitude: merged[0].latitude, longitude: merged[0].longitude }
+                : null;
+            return;
+        }
+
+        state.trackingDay.geolocs.sort((a, b) => timeToMinutes(a.timestamp) - timeToMinutes(b.timestamp));
+
+        if (!state.trackingDay.firstGeoloc && state.trackingDay.geolocs[0]) {
+            state.trackingDay.firstGeoloc = {
+                latitude: state.trackingDay.geolocs[0].latitude,
+                longitude: state.trackingDay.geolocs[0].longitude
+            };
+        }
+        if (!state.trackingDay.firstReportTime && state.trackingDay.geolocs[0]?.timestamp) {
+            state.trackingDay.firstReportTime = state.trackingDay.geolocs[0].timestamp;
+        }
+        if (!state.trackingDay.lastReportTime && state.trackingDay.geolocs.length > 0) {
+            state.trackingDay.lastReportTime = state.trackingDay.geolocs[state.trackingDay.geolocs.length - 1].timestamp || null;
+        }
+    }
+
+    function getMapPoints() {
+        const points = [];
+        const todayPoints = Array.isArray(state.trackingDay?.geolocs) && state.trackingDay.geolocs.length > 0
+            ? state.trackingDay.geolocs.slice()
+            : extractTodayGeoPointsFromPlanning();
+
+        todayPoints.forEach(pt => points.push({ ...pt }));
+        points.sort((a, b) => timeToMinutes(a.timestamp) - timeToMinutes(b.timestamp));
+        return points;
+    }
+
+    function getQuickGeolocation(timeoutMs = 1500) {
         return new Promise((resolve) => {
             if (!navigator.geolocation) {
                 resolve(null);
@@ -1218,7 +1313,7 @@
             };
         }
 
-        const pos = await getCurrentPositionQuick(1500);
+        const pos = await getQuickGeolocation(1500);
         if (pos && pos.coords && typeof pos.coords.latitude === 'number' && typeof pos.coords.longitude === 'number') {
             return {
                 coords: {
@@ -1257,6 +1352,9 @@
             resetToDefaultState();
         }
 
+        normalizeTrackingDay();
+        localStorage.setItem('atlasta_crm_v6_state', JSON.stringify(state));
+
         if (!state.clmStats) state.clmStats = [];
         MEDICAMENTS_BASE.forEach(m => {
             if (!state.clmStats.find(s => s.name === m)) {
@@ -1276,6 +1374,12 @@
                     card.style.transform = 'translateX(0px)';
                 });
             }
+        });
+
+        window.addEventListener('online', updateNetworkStatus);
+        window.addEventListener('offline', updateNetworkStatus);
+        window.addEventListener('resize', () => {
+            if (leafMap) leafMap.invalidateSize();
         });
 
         updateNetworkStatus();
@@ -1313,8 +1417,10 @@
                 climat: 'Favorable',
                 memo: 'Rien à signaler.',
                 timestamp: '09:15',
-                geoloc: { latitude: 14.6934 + (idx * 0.001), longitude: -17.4479 + (idx * 0.001), accuracy: 25 + idx },
-                gpsValid: true
+                geoloc: { latitude: 14.6934, longitude: -17.4479 },
+                gpsValid: true,
+                gpsAccuracy: 25,
+                gpsSource: 'seed'
             }
         }));
 
@@ -1334,16 +1440,7 @@
         state.planning.J5 = [];
 
         state.clmStats = MEDICAMENTS_BASE.map(m => ({ name: m, openCount: 1, totalDuration: 45 }));
-        state.trackingDay = {
-            firstReportTime: '09:15',
-            lastReportTime: '11:40',
-            firstGeoloc: { latitude: 14.6934, longitude: -17.4479 },
-            geolocs: [
-                { latitude: 14.6934, longitude: -17.4479, accuracy: 25, timestamp: '09:15', visitId: 100, prospectId: 1 }
-            ]
-        };
-
-        saveCRMState();
+        state.trackingDay = { firstReportTime: null, lastReportTime: null, firstGeoloc: null, geolocs: [] };
     }
 
     function triggerResetApp() {
@@ -1351,10 +1448,8 @@
             resetToDefaultState();
             state.currentSelectedDay = 'J2';
             state.currentView = 'planning';
-            if (leafMap) {
-                leafMap.remove();
-                leafMap = null;
-            }
+            if (leafMap) { leafMap.remove(); leafMap = null; }
+            saveCRMState();
             syncUI();
         }
     }
@@ -1441,6 +1536,7 @@
         if (Math.abs(diffX) > Math.abs(diffY)) {
             e.preventDefault();
             const card = currentSwipeWrapper.querySelector('.card');
+
             if (diffX < -20) {
                 card.style.transform = 'translateX(-140px)';
             } else if (diffX > 20) {
@@ -1508,10 +1604,11 @@
             alert("Sélectionnez au moins une molécule pour engager le Call.");
             return;
         }
-        closeModal('modal-pre-call-clm');
+        closeModal('modal-pre-call-clm', true);
 
         const visit = state.planning.J2.find(v => v.id === state.activeWorkingVisitId);
         const p = state.prospects.find(pro => pro.id === visit.prospectId);
+
         document.getElementById('clm-prospect-context').innerText = `Detailing : ${p.nom}`;
 
         const tabsContainer = document.getElementById('clm-tabs-container');
@@ -1546,6 +1643,7 @@
         clmActiveSlideStartTime = now;
 
         const currentName = precallSelectedArray[index];
+
         document.querySelectorAll('.clm-tab-btn').forEach(btn => btn.classList.remove('active'));
         document.getElementById(`btn-clm-prod${index}`).classList.add('active');
 
@@ -1633,13 +1731,6 @@
             const now = new Date();
             const timestampStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
-            if (!state.trackingDay.firstReportTime || state.trackingDay.firstReportTime === '--:--') {
-                state.trackingDay.firstReportTime = timestampStr;
-                state.trackingDay.firstGeoloc = finalGeo.coords;
-            }
-            state.trackingDay.lastReportTime = timestampStr;
-
-            if (!Array.isArray(state.trackingDay.geolocs)) state.trackingDay.geolocs = [];
             const visit = state.planning.J2.find(v => v.id === visitId);
             if (!visit) throw new Error("Visite introuvable.");
 
@@ -1656,6 +1747,13 @@
                 gpsSource: finalGeo.source
             };
 
+            const p = state.prospects.find(pro => pro.id === visit.prospectId);
+            if (p && memoText) p.memo = memoText;
+
+            normalizeTrackingDay();
+            if (!state.trackingDay.firstReportTime) state.trackingDay.firstReportTime = timestampStr;
+            state.trackingDay.lastReportTime = timestampStr;
+            if (!Array.isArray(state.trackingDay.geolocs)) state.trackingDay.geolocs = [];
             state.trackingDay.geolocs.push({
                 visitId,
                 prospectId: visit.prospectId,
@@ -1666,20 +1764,20 @@
                 gpsValid: finalGeo.gpsValid,
                 gpsSource: finalGeo.source
             });
-
-            const p = state.prospects.find(pro => pro.id === visit.prospectId);
-            if (p && memoText) p.memo = memoText;
+            normalizeTrackingDay();
 
             saveCRMState();
+            submitBtn.innerText = "Valider le CRV";
+            submitBtn.disabled = false;
             closeModal('modal-visit-report');
             renderPlanningView();
             refreshDashboardMapIfVisible();
         } catch (err) {
-            alert("Impossible d'enregistrer le CRV.");
             console.error(err);
-        } finally {
+            alert("Impossible d'enregistrer le CRV.");
             submitBtn.innerText = "Valider le CRV";
             submitBtn.disabled = false;
+            stopGeolocationTracking();
         }
     }
 
@@ -2055,28 +2153,13 @@
         const container = document.getElementById('map-container');
         const fallbackHTML = `
             <div class="map-placeholder" id="map-fallback">
-                En attente de la première validation de CRV chez le praticien.
+                Aucune géolocalisation validée sur J2 pour le moment.
             </div>
         `;
 
-        const reports = [];
-        ['J1', 'J2', 'J3', 'J4', 'J5'].forEach(day => {
-            (state.planning[day] || []).forEach(v => {
-                if (v.status === 'completed' && v.report && v.report.geoloc && v.report.gpsValid !== false) {
-                    reports.push({
-                        day,
-                        visitId: v.id,
-                        prospectId: v.prospectId,
-                        prospect: state.prospects.find(p => p.id === v.prospectId),
-                        timestamp: v.report.timestamp,
-                        geoloc: v.report.geoloc,
-                        accuracy: v.report.gpsAccuracy
-                    });
-                }
-            });
-        });
+        const points = getMapPoints();
 
-        if (reports.length === 0) {
+        if (points.length === 0) {
             if (leafMap) {
                 leafMap.remove();
                 leafMap = null;
@@ -2091,7 +2174,7 @@
         }
 
         container.innerHTML = '';
-        const latest = reports[reports.length - 1];
+        const latest = points[points.length - 1];
 
         leafMap = L.map('map-container', {
             attributionControl: false,
@@ -2104,32 +2187,36 @@
 
         const bounds = [];
 
-        reports.forEach((r, idx) => {
-            const lat = r.geoloc.latitude;
-            const lng = r.geoloc.longitude;
+        points.forEach((pt, idx) => {
+            const lat = pt.latitude;
+            const lng = pt.longitude;
             bounds.push([lat, lng]);
 
-            const labelName = r.prospect ? r.prospect.nom : `Visite ${idx + 1}`;
+            const isValid = pt.gpsValid !== false;
+            const circleColor = isValid ? '#2563eb' : '#dc2626';
+            const fillColor = isValid ? '#60a5fa' : '#f87171';
+            const labelName = state.prospects.find(p => p.id === pt.prospectId)?.nom || `Visite ${idx + 1}`;
+
             const popupHtml = `
                 <div style="font-size:12px; line-height:1.35;">
                     <strong>${labelName}</strong><br>
-                    ${r.timestamp ? `Heure : ${r.timestamp}<br>` : ''}
-                    ${typeof r.accuracy === 'number' ? `Précision : ${Math.round(r.accuracy)} m<br>` : ''}
-                    ${r.day ? `Jour : ${r.day}<br>` : ''}
-                    ${r.geoloc.latitude.toFixed(5)}, ${r.geoloc.longitude.toFixed(5)}
+                    ${pt.timestamp ? `Heure : ${pt.timestamp}<br>` : ''}
+                    ${typeof pt.accuracy === 'number' ? `Précision : ${Math.round(pt.accuracy)} m<br>` : ''}
+                    ${isValid ? 'Position GPS validée' : 'Position estimée (fallback)<br>'}
+                    ${pt.latitude.toFixed(5)}, ${pt.longitude.toFixed(5)}
                 </div>
             `;
 
             L.circleMarker([lat, lng], {
                 radius: 7,
-                color: '#2563eb',
+                color: circleColor,
                 weight: 2,
-                fillColor: '#60a5fa',
-                fillOpacity: 0.8
+                fillColor: fillColor,
+                fillOpacity: 0.85
             }).addTo(leafMap).bindPopup(popupHtml);
 
             L.circle([lat, lng], {
-                color: '#2563eb',
+                color: circleColor,
                 radius: 500,
                 weight: 1,
                 fillOpacity: 0.08
@@ -2139,7 +2226,7 @@
         if (bounds.length > 1) {
             leafMap.fitBounds(bounds, { padding: [20, 20] });
         } else {
-            leafMap.setView([latest.geoloc.latitude, latest.geoloc.longitude], 14);
+            leafMap.setView([latest.latitude, latest.longitude], 14);
         }
 
         setTimeout(() => {
@@ -2173,6 +2260,7 @@
         let total = 0;
         let visitedIds = new Set();
         let metrics = {};
+        let countByProspect = {};
         MEDICAMENTS_BASE.forEach(m => metrics[m] = 0);
 
         ['J1', 'J2', 'J3', 'J4', 'J5'].forEach(d => {
@@ -2180,6 +2268,7 @@
                 if (v.status === 'completed') {
                     done++;
                     visitedIds.add(v.prospectId);
+                    countByProspect[v.prospectId] = (countByProspect[v.prospectId] || 0) + 1;
                     if (v.report?.products) v.report.products.forEach(m => {
                         if (metrics[m] !== undefined) metrics[m]++;
                     });
@@ -2188,10 +2277,29 @@
             });
         });
 
-        document.getElementById('dash-coverage').innerText = `${Math.round((visitedIds.size / state.prospects.length) * 100)}%`;
+        const totalProspects = Math.max(state.prospects.length, 1);
+        const coverage = Math.round((visitedIds.size / totalProspects) * 100);
+        document.getElementById('dash-coverage').innerText = `${coverage}%`;
         document.getElementById('dash-done-visits').innerText = done;
         document.getElementById('dash-remaining-visits').innerText = state.prospects.length - visitedIds.size;
-        document.getElementById('dash-day-perf').innerText = '100%';
+        document.getElementById('dash-day-perf').innerText = total > 0 ? `${Math.round((done / total) * 100)}%` : '0%';
+
+        const kolRemaining = state.prospects.filter(p => p.influence === 'KOL' && !visitedIds.has(p.id)).length;
+        const kblRemaining = state.prospects.filter(p => p.influence === 'KBL' && !visitedIds.has(p.id)).length;
+        document.getElementById('dash-rem-kol').innerText = kolRemaining;
+        document.getElementById('dash-rem-kbl').innerText = kblRemaining;
+        document.getElementById('dash-never-visited').innerText = state.prospects.length - visitedIds.size;
+
+        const targetMap = { A: 3, B: 2, C: 1 };
+        let targetTotal = 0;
+        let targetAchieved = 0;
+        state.prospects.forEach(p => {
+            const target = targetMap[p.potentiel] || 1;
+            targetTotal += target;
+            targetAchieved += Math.min(countByProspect[p.id] || 0, target);
+        });
+        const frequencyScore = targetTotal > 0 ? Math.round((targetAchieved / targetTotal) * 100) : 0;
+        document.getElementById('dash-frequency-score').innerText = `${frequencyScore}%`;
 
         const prodList = document.getElementById('dash-products-list');
         prodList.innerHTML = '';
@@ -2200,9 +2308,12 @@
         });
     }
 
-    function closeModal(id) {
-        document.getElementById(id).style.display = 'none';
-        if (id === 'modal-visit-report') stopGeolocationTracking();
+    function closeModal(id, keepTracking = false) {
+        const modal = document.getElementById(id);
+        if (modal) modal.style.display = 'none';
+        if (!keepTracking && (id === 'modal-pre-call-clm' || id === 'modal-visit-report')) {
+            stopGeolocationTracking();
+        }
     }
 
     function closeModalOnOuterClick(e, modalId) {

@@ -1643,7 +1643,7 @@
             document.getElementById('map-container').innerHTML = '';
             leafMap = L.map('map-container', { attributionControl: false, zoomControl: false }).setView([lat, lng], 14);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(leafMap);
-            L.circle([lat, lng], { color: '#2563eb', radius: 500 }).addTo(leafMap);
+            L.circle([lat, lng], { color: '#2563eb', radius: 20 }).addTo(leafMap);
         }
 
         function updateDashboardCalculations() {

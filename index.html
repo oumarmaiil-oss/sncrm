@@ -995,7 +995,7 @@
         <div id="view-prospect-details-container"></div>
         <div class="form-group" style="margin-top: 15px;">
             <label>Mémo Flash Confidentiel</label>
-            <textarea id="view-prospect-memo-field" rows="2" placeholder="Aucun mémo saisi. Modifiez ici si besoin."></textarea>
+            <textarea id="view-prospect-memo-field" rows="3" placeholder="Aucun mémo saisi. Modifiez ici si besoin."></textarea>
         </div>
         <div class="btn-group">
             <button class="btn-modal btn-modal-cancel" onclick="closeModal('modal-prospect-view')">Fermer</button>
@@ -1085,10 +1085,6 @@
         "Oméprazole", "Amlodipine", "Ramipril", "Salbutamol", "Azithromycine"
     ];
 
-    const GPS_WAIT_MS = 5000;
-    const GPS_TARGET_ACCURACY_M = 200;
-    const GPS_FALLBACK_COORDS = { latitude: 14.6934, longitude: -17.4479 };
-
     const CLM_PRODUCTS_DATA = [
         { name: "Amoxicilline", slides: [
             { title: "Amoxicilline 1g - Introduction", desc: "<b>Antibiotique de 1ère intention</b><br><br>Traitement de choix contre les infections respiratoires hautes et basses communautaires." },
@@ -1127,7 +1123,7 @@
         ]}
     ];
 
-    const PROSPECTS_INITIALS = [
+    const PROSPEcripts_INITIALS = [
         { id: 1, type: 'Pharmacien', nom: 'Pharmacie Nationale', spec: 'Officine', etablissement: 'Pharmacie', secteur: 'Plateau', potentiel: 'A', influence: 'KBL', anniv: '22 Mai', contact: '+221 33 821 44 55', memo: 'Préfère les visites le matin avant le rush.' },
         { id: 2, type: 'Pharmacien', nom: 'Pharmacie de la Paix', spec: 'Officine', etablissement: 'Pharmacie', secteur: 'Medina', potentiel: 'B', influence: 'Standard', anniv: '24 Mars', contact: '+221 33 824 99 11', memo: '' },
         { id: 3, type: 'Infirmière', nom: 'Mme. Diagne Awa', spec: 'Soins Ambulatoires', etablissement: 'Poste de Santé', secteur: 'Yoff', potentiel: 'C', influence: 'Standard', anniv: '05 Novembre', contact: '+221 77 512 34 56', memo: '' },
@@ -1148,8 +1144,7 @@
         currentView: 'planning',
         activeWorkingVisitId: null,
         targetPlanningDay: null,
-        clmStats: [],
-        trackingDay: { firstReportTime: null, lastReportTime: null, firstGeoloc: null, geolocs: [] }
+        clmStats: []
     };
 
     let precallSelectedArray = [];
@@ -1163,8 +1158,45 @@
     let touchStartY = 0;
     let currentSwipeWrapper = null;
 
-    let geoWatcherId = null;
-    let bestLocation = null;
+    // --- Geolocation Simple One-Shot ---
+    function getSimplerLocation() {
+        return new Promise((resolve) => {
+            if (!navigator.geolocation) {
+                resolve({ lat: 14.6934, lng: -17.4479, valid: false }); // Dakar par défaut
+                return;
+            }
+            
+            // Timeout de 5 secondes pour ne pas bloquer l'utilisateur
+            const timeoutId = setTimeout(() => {
+                resolve({ lat: 14.6934, lng: -17.4479, valid: false });
+            }, 5000); 
+
+            navigator.geolocation.getCurrentPosition(
+                (position) => {
+                    clearTimeout(timeoutId);
+                    resolve({
+                        lat: position.coords.latitude,
+                        lng: position.coords.longitude,
+                        valid: true
+                    });
+                },
+                (error) => {
+                    clearTimeout(timeoutId);
+                    console.warn("Erreur GPS: ", error);
+                    resolve({ lat: 14.6934, lng: -17.4479, valid: false }); // Fallback Dakar
+                },
+                { enableHighAccuracy: true, timeout: 4500, maximumAge: 10000 }
+            );
+        });
+    }
+
+    // --- Utilitaires de données et calculs HCP ---
+    function timeToMinutes(value) {
+        if (typeof value !== 'string') return Number.MAX_SAFE_INTEGER;
+        const match = value.match(/^(\d{1,2}):(\d{2})$/);
+        if (!match) return Number.MAX_SAFE_INTEGER;
+        return (parseInt(match[1], 10) * 60) + parseInt(match[2], 10);
+    }
 
     function getHCPMetrics(prospectId) {
         const targetMap = { A: 3, B: 2, C: 1 };
@@ -1200,244 +1232,13 @@
         };
     }
 
-    function stopGeolocationTracking() {
-        if (geoWatcherId !== null && navigator.geolocation) {
-            navigator.geolocation.clearWatch(geoWatcherId);
-            geoWatcherId = null;
-        }
-    }
-
-    function startGeolocationTracking() {
-        stopGeolocationTracking();
-        bestLocation = null;
-
-        if (!navigator.geolocation) return;
-
-        geoWatcherId = navigator.geolocation.watchPosition(
-            (position) => {
-                const accuracy = typeof position.coords.accuracy === 'number'
-                    ? position.coords.accuracy
-                    : Number.POSITIVE_INFINITY;
-
-                if (
-                    !bestLocation ||
-                    accuracy < bestLocation.accuracy ||
-                    (bestLocation.accuracy > GPS_TARGET_ACCURACY_M && accuracy <= GPS_TARGET_ACCURACY_M)
-                ) {
-                    bestLocation = {
-                        latitude: position.coords.latitude,
-                        longitude: position.coords.longitude,
-                        accuracy
-                    };
-                }
-            },
-            (error) => {
-                console.log("GPS tracking error:", error);
-            },
-            { enableHighAccuracy: true, maximumAge: 0, timeout: GPS_WAIT_MS }
-        );
-    }
-
-    function timeToMinutes(value) {
-        if (typeof value !== 'string') return Number.MAX_SAFE_INTEGER;
-        const match = value.match(/^(\d{1,2}):(\d{2})$/);
-        if (!match) return Number.MAX_SAFE_INTEGER;
-        return (parseInt(match[1], 10) * 60) + parseInt(match[2], 10);
-    }
-
-    function geoPointKey(point) {
-        return [
-            point.visitId || '',
-            point.timestamp || '',
-            point.latitude || '',
-            point.longitude || ''
-        ].join('|');
-    }
-
-    function extractTodayGeoPointsFromPlanning() {
-        const points = [];
-        (state.planning.J2 || []).forEach(v => {
-            if (v.status === 'completed' && v.report && v.report.geoloc) {
-                points.push({
-                    visitId: v.id,
-                    prospectId: v.prospectId,
-                    timestamp: v.report.timestamp || null,
-                    latitude: v.report.geoloc.latitude,
-                    longitude: v.report.geoloc.longitude,
-                    accuracy: typeof v.report.gpsAccuracy === 'number' ? v.report.gpsAccuracy : null,
-                    gpsValid: v.report.gpsValid !== false,
-                    gpsSource: v.report.gpsSource || 'legacy'
-                });
-            }
-        });
-        points.sort((a, b) => timeToMinutes(a.timestamp) - timeToMinutes(b.timestamp));
-        return points;
-    }
-
-    function normalizeTrackingDay() {
-        if (!state.trackingDay || typeof state.trackingDay !== 'object') {
-            state.trackingDay = { firstReportTime: null, lastReportTime: null, firstGeoloc: null, geolocs: [] };
-        }
-        if (!Array.isArray(state.trackingDay.geolocs)) {
-            state.trackingDay.geolocs = [];
-        }
-
-        const todayPoints = extractTodayGeoPointsFromPlanning();
-        const merged = [];
-        const seen = new Set();
-
-        todayPoints.forEach(pt => {
-            const key = geoPointKey(pt);
-            if (!seen.has(key)) {
-                seen.add(key);
-                merged.push(pt);
-            }
-        });
-
-        if (merged.length > 0) {
-            state.trackingDay.geolocs = merged;
-            state.trackingDay.firstReportTime = merged[0]?.timestamp || null;
-            state.trackingDay.lastReportTime = merged[merged.length - 1]?.timestamp || null;
-            state.trackingDay.firstGeoloc = merged[0]
-                ? { latitude: merged[0].latitude, longitude: merged[0].longitude }
-                : null;
-            return;
-        }
-
-        state.trackingDay.geolocs.sort((a, b) => timeToMinutes(a.timestamp) - timeToMinutes(b.timestamp));
-
-        if (!state.trackingDay.firstGeoloc && state.trackingDay.geolocs[0]) {
-            state.trackingDay.firstGeoloc = {
-                latitude: state.trackingDay.geolocs[0].latitude,
-                longitude: state.trackingDay.geolocs[0].longitude
-            };
-        }
-        if (!state.trackingDay.firstReportTime && state.trackingDay.geolocs[0]?.timestamp) {
-            state.trackingDay.firstReportTime = state.trackingDay.geolocs[0].timestamp;
-        }
-        if (!state.trackingDay.lastReportTime && state.trackingDay.geolocs.length > 0) {
-            state.trackingDay.lastReportTime = state.trackingDay.geolocs[state.trackingDay.geolocs.length - 1].timestamp || null;
-        }
-    }
-
-    function getMapPoints() {
-        const points = [];
-        const todayPoints = Array.isArray(state.trackingDay?.geolocs) && state.trackingDay.geolocs.length > 0
-            ? state.trackingDay.geolocs.slice()
-            : extractTodayGeoPointsFromPlanning();
-
-        todayPoints.forEach(pt => points.push({ ...pt }));
-        points.sort((a, b) => timeToMinutes(a.timestamp) - timeToMinutes(b.timestamp));
-        return points;
-    }
-
-    function getQuickGeolocation(timeoutMs = GPS_WAIT_MS) {
-        return new Promise((resolve) => {
-            if (!navigator.geolocation) {
-                resolve(null);
-                return;
-            }
-
-            let settled = false;
-            const done = (value) => {
-                if (!settled) {
-                    settled = true;
-                    resolve(value);
-                }
-            };
-
-            navigator.geolocation.getCurrentPosition(
-                (pos) => done(pos),
-                () => done(null),
-                { enableHighAccuracy: true, maximumAge: 0, timeout: timeoutMs }
-            );
-
-            setTimeout(() => done(null), timeoutMs + 100);
-        });
-    }
-
-    async function collectFinalGeolocation() {
-        const startedAt = Date.now();
-
-        const checkBest = () => {
-            if (bestLocation && Number.isFinite(bestLocation.accuracy) && bestLocation.accuracy <= GPS_TARGET_ACCURACY_M) {
-                return {
-                    coords: {
-                        latitude: bestLocation.latitude,
-                        longitude: bestLocation.longitude
-                    },
-                    accuracy: bestLocation.accuracy,
-                    gpsValid: true,
-                    source: 'watch-good'
-                };
-            }
-            return null;
-        };
-
-        const immediate = checkBest();
-        if (immediate) return immediate;
-
-        const oneShotPromise = getQuickGeolocation(GPS_WAIT_MS);
-
-        while (Date.now() - startedAt < GPS_WAIT_MS) {
-            const ready = checkBest();
-            if (ready) return ready;
-            await new Promise(r => setTimeout(r, 150));
-        }
-
-        const pos = await oneShotPromise;
-        if (pos && pos.coords && typeof pos.coords.latitude === 'number' && typeof pos.coords.longitude === 'number') {
-            return {
-                coords: {
-                    latitude: pos.coords.latitude,
-                    longitude: pos.coords.longitude
-                },
-                accuracy: typeof pos.coords.accuracy === 'number' ? pos.coords.accuracy : null,
-                gpsValid: true,
-                source: 'current-position'
-            };
-        }
-
-        if (bestLocation) {
-            return {
-                coords: {
-                    latitude: bestLocation.latitude,
-                    longitude: bestLocation.longitude
-                },
-                accuracy: bestLocation.accuracy,
-                gpsValid: bestLocation.accuracy <= GPS_TARGET_ACCURACY_M,
-                source: 'watch-fallback'
-            };
-        }
-
-        return {
-            coords: GPS_FALLBACK_COORDS,
-            accuracy: null,
-            gpsValid: false,
-            source: 'fallback'
-        };
-    }
-
-    function refreshDashboardMapIfVisible() {
-        if (state.currentView === 'dashboard' && document.getElementById('sub-view-terrain')?.classList.contains('active')) {
-            setTimeout(() => {
-                initOrRefreshLeafletMap();
-            }, 80);
-        }
-    }
-
     function initCRM() {
         const cache = localStorage.getItem('atlasta_crm_v6_state');
         if (cache) {
             state = JSON.parse(cache);
-            if (!state.trackingDay) state.trackingDay = { firstReportTime: null, lastReportTime: null, firstGeoloc: null, geolocs: [] };
-            if (!Array.isArray(state.trackingDay.geolocs)) state.trackingDay.geolocs = [];
         } else {
             resetToDefaultState();
         }
-
-        normalizeTrackingDay();
-        localStorage.setItem('atlasta_crm_v6_state', JSON.stringify(state));
 
         if (!state.clmStats) state.clmStats = [];
         MEDICAMENTS_BASE.forEach(m => {
@@ -1484,11 +1285,14 @@
     function saveCRMState() {
         localStorage.setItem('atlasta_crm_v6_state', JSON.stringify(state));
         updateDashboardCalculations();
-        refreshDashboardMapIfVisible();
+        
+        if (state.currentView === 'dashboard' && document.getElementById('sub-view-terrain')?.classList.contains('active')) {
+            setTimeout(() => { initOrRefreshLeafletMap(); }, 80);
+        }
     }
 
     function resetToDefaultState() {
-        state.prospects = JSON.parse(JSON.stringify(PROSPECTS_INITIALS));
+        state.prospects = JSON.parse(JSON.stringify(PROSPEcripts_INITIALS));
         state.activities = { J1: 'Terrain', J2: 'Terrain', J3: 'Terrain', J4: 'Terrain', J5: 'Terrain' };
 
         state.planning.J1 = state.prospects.slice(0, 4).map((p, idx) => ({
@@ -1501,10 +1305,8 @@
                 climat: 'Favorable',
                 memo: 'Rien à signaler.',
                 timestamp: '09:15',
-                geoloc: { latitude: 14.6934, longitude: -17.4479 },
-                gpsValid: true,
-                gpsAccuracy: 25,
-                gpsSource: 'seed'
+                geoloc: { lat: 14.6934, lng: -17.4479 },
+                gpsValid: true
             }
         }));
 
@@ -1524,7 +1326,6 @@
         state.planning.J5 = [];
 
         state.clmStats = MEDICAMENTS_BASE.map(m => ({ name: m, openCount: 1, totalDuration: 45 }));
-        state.trackingDay = { firstReportTime: null, lastReportTime: null, firstGeoloc: null, geolocs: [] };
     }
 
     function triggerResetApp() {
@@ -1595,6 +1396,7 @@
         renderPlanningView();
     }
 
+    // --- SWIPE LOGIC ---
     function handleTouchStart(e, wrapperEl) {
         if (state.currentSelectedDay !== 'J2' || state.activities.J2 === 'Clôturée') return;
         const card = wrapperEl.querySelector('.card');
@@ -1629,24 +1431,19 @@
         }
     }
 
-    function handleTouchEnd() {
-        currentSwipeWrapper = null;
-    }
+    function handleTouchEnd() { currentSwipeWrapper = null; }
 
     function resetCardSwipe(btnElement) {
         const wrapper = btnElement.closest('.swipe-wrapper');
-        if (wrapper) {
-            const card = wrapper.querySelector('.card');
-            card.style.transform = 'translateX(0px)';
-        }
+        if (wrapper) wrapper.querySelector('.card').style.transform = 'translateX(0px)';
     }
 
+    // --- PRE-CALL & CLM ---
     function openPreCallModal(visitId) {
         state.activeWorkingVisitId = visitId;
         precallSelectedArray = [];
         renderPreCallList();
         document.getElementById('modal-pre-call-clm').style.display = 'flex';
-        startGeolocationTracking();
     }
 
     function renderPreCallList() {
@@ -1688,7 +1485,7 @@
             alert("Sélectionnez au moins une molécule pour engager le Call.");
             return;
         }
-        closeModal('modal-pre-call-clm', true);
+        closeModal('modal-pre-call-clm');
 
         const visit = state.planning.J2.find(v => v.id === state.activeWorkingVisitId);
         const p = state.prospects.find(pro => pro.id === visit.prospectId);
@@ -1750,7 +1547,6 @@
             clearInterval(clmTimerInterval);
             currentActiveClmProductIndex = null;
             document.getElementById('modal-clm-viewer').style.display = 'none';
-            stopGeolocationTracking();
         }
     }
 
@@ -1794,10 +1590,11 @@
         });
     }
 
+    // --- SOUMISSION DU CRV ---
     async function submitVisitReport(e) {
         e.preventDefault();
         const submitBtn = document.getElementById('btn-submit-report-form');
-        submitBtn.innerText = "Enregistrement en cours...";
+        submitBtn.innerText = "Acquisition GPS et enregistrement...";
         submitBtn.disabled = true;
 
         try {
@@ -1809,8 +1606,8 @@
             const selectedProducts = [];
             document.querySelectorAll('input[name="prod"]:checked').forEach(chk => selectedProducts.push(chk.value));
 
-            const finalGeo = await collectFinalGeolocation();
-            stopGeolocationTracking();
+            // Géolocalisation simple au moment exact de la soumission
+            const finalGeo = await getSimplerLocation();
 
             const now = new Date();
             const timestampStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
@@ -1825,42 +1622,22 @@
                 climat,
                 memo: memoText,
                 timestamp: timestampStr,
-                geoloc: finalGeo.coords,
-                gpsValid: finalGeo.gpsValid,
-                gpsAccuracy: finalGeo.accuracy,
-                gpsSource: finalGeo.source
+                geoloc: { lat: finalGeo.lat, lng: finalGeo.lng },
+                gpsValid: finalGeo.valid
             };
 
             const p = state.prospects.find(pro => pro.id === visit.prospectId);
             if (p && memoText) p.memo = memoText;
 
-            if (!state.trackingDay) state.trackingDay = { firstReportTime: null, lastReportTime: null, firstGeoloc: null, geolocs: [] };
-            if (!Array.isArray(state.trackingDay.geolocs)) state.trackingDay.geolocs = [];
-
-            state.trackingDay.geolocs.push({
-                visitId,
-                prospectId: visit.prospectId,
-                timestamp: timestampStr,
-                latitude: finalGeo.coords.latitude,
-                longitude: finalGeo.coords.longitude,
-                accuracy: finalGeo.accuracy,
-                gpsValid: finalGeo.gpsValid,
-                gpsSource: finalGeo.source
-            });
-
-            normalizeTrackingDay();
             saveCRMState();
-            submitBtn.innerText = "Valider le CRV";
-            submitBtn.disabled = false;
             closeModal('modal-visit-report');
             renderPlanningView();
-            refreshDashboardMapIfVisible();
         } catch (err) {
             console.error(err);
-            alert("Impossible d'enregistrer le CRV.");
+            alert("Erreur technique lors de l'enregistrement.");
+        } finally {
             submitBtn.innerText = "Valider le CRV";
             submitBtn.disabled = false;
-            stopGeolocationTracking();
         }
     }
 
@@ -2263,94 +2040,81 @@
         else specInput.value = '';
     }
 
+    // --- CARTE DASHBOARD (SIMPLE ET DIRECTE) ---
     function initOrRefreshLeafletMap() {
         const container = document.getElementById('map-container');
-        const fallbackHTML = `
-            <div class="map-placeholder" id="map-fallback">
-                Aucune géolocalisation validée sur J2 pour le moment.
-            </div>
-        `;
-
-        const points = getMapPoints();
+        
+        // Lire uniquement les points validés sur J2
+        const points = [];
+        (state.planning.J2 || []).forEach(visit => {
+            if (visit.status === 'completed' && visit.report && visit.report.geoloc) {
+                points.push({
+                    lat: visit.report.geoloc.lat,
+                    lng: visit.report.geoloc.lng,
+                    valid: visit.report.gpsValid,
+                    timestamp: visit.report.timestamp,
+                    prospectId: visit.prospectId
+                });
+            }
+        });
 
         if (points.length === 0) {
-            if (leafMap) {
-                leafMap.remove();
-                leafMap = null;
-            }
-            container.innerHTML = fallbackHTML;
+            if (leafMap) { leafMap.remove(); leafMap = null; }
+            container.innerHTML = `
+                <div class="map-placeholder" id="map-fallback">
+                    Aucune géolocalisation validée sur J2 pour le moment.
+                </div>
+            `;
             return;
         }
 
-        if (leafMap) {
-            leafMap.remove();
-            leafMap = null;
-        }
-
+        if (leafMap) { leafMap.remove(); leafMap = null; }
         container.innerHTML = '';
-        const latest = points[points.length - 1];
 
-        leafMap = L.map('map-container', {
-            attributionControl: false,
-            zoomControl: true
-        });
+        leafMap = L.map('map-container', { attributionControl: false, zoomControl: true });
 
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 19
-        }).addTo(leafMap);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(leafMap);
 
         const bounds = [];
 
         points.forEach((pt, idx) => {
-            const lat = pt.latitude;
-            const lng = pt.longitude;
-            bounds.push([lat, lng]);
+            bounds.push([pt.lat, pt.lng]);
 
-            const isValid = pt.gpsValid !== false;
-            const circleColor = isValid ? '#2563eb' : '#dc2626';
-            const fillColor = isValid ? '#60a5fa' : '#f87171';
-            const labelName = state.prospects.find(p => p.id === pt.prospectId)?.nom || `Visite ${idx + 1}`;
+            const circleColor = pt.valid ? '#2563eb' : '#dc2626';
+            const fillColor = pt.valid ? '#60a5fa' : '#f87171';
+            const p = state.prospects.find(pro => pro.id === pt.prospectId);
+            const labelName = p ? p.nom : `Visite ${idx + 1}`;
 
             const popupHtml = `
                 <div style="font-size:12px; line-height:1.35;">
                     <strong>${labelName}</strong><br>
                     ${pt.timestamp ? `Heure : ${pt.timestamp}<br>` : ''}
-                    ${typeof pt.accuracy === 'number' ? `Précision : ${Math.round(pt.accuracy)} m<br>` : ''}
-                    ${isValid ? 'Position GPS validée<br>' : 'Position estimée (fallback)<br>'}
-                    ${pt.latitude.toFixed(5)}, ${pt.longitude.toFixed(5)}
+                    ${pt.valid ? 'Position GPS validée' : 'Position par défaut (Dakar)'}
                 </div>
             `;
 
-            L.circleMarker([lat, lng], {
-                radius: 7,
-                color: circleColor,
-                weight: 2,
-                fillColor: fillColor,
-                fillOpacity: 0.85
+            L.circleMarker([pt.lat, pt.lng], {
+                radius: 7, color: circleColor, weight: 2, fillColor: fillColor, fillOpacity: 0.85
             }).addTo(leafMap).bindPopup(popupHtml);
 
-            L.circle([lat, lng], {
-                color: circleColor,
-                radius: 500,
-                weight: 1,
-                fillOpacity: 0.08
+            L.circle([pt.lat, pt.lng], {
+                color: circleColor, radius: 500, weight: 1, fillOpacity: 0.08
             }).addTo(leafMap);
         });
 
         if (bounds.length > 1) {
             leafMap.fitBounds(bounds, { padding: [20, 20] });
         } else {
-            leafMap.setView([latest.latitude, latest.longitude], 14);
+            leafMap.setView(bounds[0], 14);
         }
 
-        setTimeout(() => {
-            if (leafMap) leafMap.invalidateSize();
-        }, 150);
+        setTimeout(() => { if (leafMap) leafMap.invalidateSize(); }, 150);
     }
 
     function updateDashboardCalculations() {
-        document.getElementById('dash-start-time').innerText = state.trackingDay.firstReportTime || '--:--';
-        document.getElementById('dash-end-time').innerText = state.trackingDay.lastReportTime || '--:--';
+        const completedJ2 = state.planning.J2.filter(v => v.status === 'completed' && v.report).sort((a,b) => timeToMinutes(a.report.timestamp) - timeToMinutes(b.report.timestamp));
+        document.getElementById('dash-start-time').innerText = completedJ2.length > 0 ? completedJ2[0].report.timestamp : '--:--';
+        document.getElementById('dash-end-time').innerText = completedJ2.length > 0 ? completedJ2[completedJ2.length-1].report.timestamp : '--:--';
 
         const clmBody = document.getElementById('clm-stats-table-body');
         clmBody.innerHTML = '';
@@ -2422,12 +2186,9 @@
         });
     }
 
-    function closeModal(id, keepTracking = false) {
+    function closeModal(id) {
         const modal = document.getElementById(id);
         if (modal) modal.style.display = 'none';
-        if (!keepTracking && (id === 'modal-pre-call-clm' || id === 'modal-visit-report')) {
-            stopGeolocationTracking();
-        }
     }
 
     function closeModalOnOuterClick(e, modalId) {

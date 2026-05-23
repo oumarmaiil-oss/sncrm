@@ -239,6 +239,7 @@
             z-index: 2;
             transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
             box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+            margin-bottom: 8px;
         }
         .card.state-completed { border-left: 4px solid var(--success); }
         .card.state-planned { border-left: 4px solid #cbd5e1; }
@@ -271,6 +272,19 @@
             color: var(--gray-text);
             margin-bottom: 2px;
         }
+
+        .hcp-metrics-bar {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.65rem;
+            background: #f8fafc;
+            padding: 4px 8px;
+            border-radius: 4px;
+            margin-top: 6px;
+            border: 1px solid #e2e8f0;
+            color: var(--gray-text);
+        }
+        .hcp-metrics-bar b { color: var(--dark); font-weight: 700; }
 
         .badge {
             font-size: 0.6rem;
@@ -622,6 +636,19 @@
             border-bottom: 1px solid var(--border);
             padding-bottom: 4px;
         }
+        
+        .profile-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            background: #f8fafc;
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            font-size: 0.75rem;
+        }
+        .profile-grid div strong { color: var(--gray-text); display: block; font-size: 0.65rem; text-transform: uppercase; margin-bottom: 2px;}
+
         .form-group { margin-bottom: 10px; }
         .form-group label {
             display: block;
@@ -687,18 +714,6 @@
         .climat-option.active[data-val="Réticence"] { background: var(--danger-light); border-color: var(--danger); color: var(--danger); }
         .climat-option.active[data-val="Neutre"] { background: var(--warning-light); border-color: var(--warning); color: var(--warning); }
         .climat-option.active[data-val="Favorable"] { background: var(--success-light); border-color: var(--success); color: var(--success); }
-
-        .prospect-detail-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 6px 0;
-            border-bottom: 1px solid #f1f5f9;
-            font-size: 0.82rem;
-        }
-        .prospect-detail-row strong {
-            color: var(--gray-text);
-            font-weight: 600;
-        }
     </style>
 </head>
 <body>
@@ -978,7 +993,7 @@
     <div class="modal">
         <h3 class="modal-title" id="view-prospect-name">Fiche HCP</h3>
         <div id="view-prospect-details-container"></div>
-        <div class="form-group" style="margin-top: 10px;">
+        <div class="form-group" style="margin-top: 15px;">
             <label>Mémo Flash Confidentiel</label>
             <textarea id="view-prospect-memo-field" rows="2" placeholder="Aucun mémo saisi. Modifiez ici si besoin."></textarea>
         </div>
@@ -1150,6 +1165,40 @@
 
     let geoWatcherId = null;
     let bestLocation = null;
+
+    function getHCPMetrics(prospectId) {
+        const targetMap = { A: 3, B: 2, C: 1 };
+        const p = state.prospects.find(pro => pro.id === prospectId);
+        const objectif = p ? (targetMap[p.potentiel] || 1) : 1;
+        let visitesEffectuees = 0;
+        let lastVisit = null;
+        let nextVisit = null;
+
+        const days = ['J1', 'J2', 'J3', 'J4', 'J5'];
+        let todayIndex = days.indexOf(state.currentSelectedDay);
+        if (todayIndex === -1) todayIndex = 1;
+
+        days.forEach((day, idx) => {
+            (state.planning[day] || []).forEach(v => {
+                if (v.prospectId === prospectId) {
+                    if (v.status === 'completed') {
+                        visitesEffectuees++;
+                        lastVisit = day;
+                    } else if (v.status === 'planned' || v.status === 'postponed') {
+                        if (!nextVisit && idx >= todayIndex) {
+                            nextVisit = day;
+                        }
+                    }
+                }
+            });
+        });
+
+        return {
+            ratio: `${visitesEffectuees}/${objectif}`,
+            lastVisit: lastVisit ? lastVisit : '-',
+            nextVisit: nextVisit ? nextVisit : '-'
+        };
+    }
 
     function stopGeolocationTracking() {
         if (geoWatcherId !== null && navigator.geolocation) {
@@ -1884,16 +1933,30 @@
         }
     }
 
-    function openDirectMemoModal(prospectId) {
+    function openHCPProfile(prospectId) {
         const p = state.prospects.find(pro => pro.id === prospectId);
         if (!p) return;
         state.activeWorkingVisitId = prospectId;
+
+        const metrics = getHCPMetrics(p.id);
+
         document.getElementById('view-prospect-name').innerText = p.nom;
         document.getElementById('view-prospect-details-container').innerHTML = `
-            <div class="prospect-detail-row"><strong>Spécialité :</strong> <span>${p.spec}</span></div>
-            <div class="prospect-detail-row"><strong>Établissement :</strong> <span>${p.etablissement}</span></div>
-            <div class="prospect-detail-row"><strong>Secteur :</strong> <span>${p.secteur}</span></div>
-            <div class="prospect-detail-row"><strong>Potentiel :</strong> <span>Classe ${p.potentiel}</span></div>
+            <div class="profile-grid">
+                <div><strong>Typologie</strong> ${p.type}</div>
+                <div><strong>Spécialité</strong> ${p.spec}</div>
+                <div><strong>Établissement</strong> ${p.etablissement}</div>
+                <div><strong>Secteur</strong> ${p.secteur}</div>
+                <div><strong>Potentiel</strong> Classe ${p.potentiel}</div>
+                <div><strong>Influence</strong> ${p.influence}</div>
+                <div><strong>Anniversaire</strong> ${p.anniv || '-'}</div>
+                <div><strong>Contact</strong> ${p.contact || '-'}</div>
+            </div>
+            <div class="hcp-metrics-bar" style="margin-top: 10px; font-size: 0.75rem; justify-content: space-around;">
+                <span>Dernière : <b>${metrics.lastVisit}</b></span>
+                <span>Prochaine : <b>${metrics.nextVisit}</b></span>
+                <span>Conformité : <b style="color:var(--success)">${metrics.ratio}</b></span>
+            </div>
         `;
         document.getElementById('view-prospect-memo-field').value = p.memo || '';
         document.getElementById('modal-prospect-view').style.display = 'flex';
@@ -1906,6 +1969,7 @@
             saveCRMState();
             closeModal('modal-prospect-view');
             if (state.currentView === 'planning') renderPlanningView();
+            if (state.currentView === 'directory') renderDirectoryView();
         }
     }
 
@@ -1958,6 +2022,8 @@
             const p = state.prospects.find(pro => pro.id === visit.prospectId);
             if (!p) return;
 
+            const metrics = getHCPMetrics(p.id);
+
             let cardStateClass = 'state-planned';
             let statusTextHTML = '';
             let isActionDisabled = false;
@@ -2006,6 +2072,11 @@
                             </div>
                             <div class="card-meta">${p.type} - ${p.spec} | Etablissement ${p.etablissement}</div>
                             <div class="status-indicator">${statusTextHTML}</div>
+                            <div class="hcp-metrics-bar">
+                                <span>Préc. : <b>${metrics.lastVisit}</b></span>
+                                <span>Proc. : <b>${metrics.nextVisit}</b></span>
+                                <span>Conf. : <b style="color:var(--success)">${metrics.ratio}</b></span>
+                            </div>
                         </div>
                         ${day === 'J2' ? `<button class="btn-action-trigger" onclick="openPreCallModal(${visit.id})" ${isActionDisabled ? 'disabled' : ''}>Engager Call</button>` : ''}
                     </div>
@@ -2013,11 +2084,11 @@
                     ${day !== 'J2' ? `
                         <div class="card-actions-mini">
                             <button class="btn-mini" onclick="openPlanVisitModal(${visit.id}, true)">Planifier Relance</button>
-                            <button class="btn-mini btn-mini-primary" onclick="openDirectMemoModal(${p.id})">Mémo Flash</button>
+                            <button class="btn-mini btn-mini-primary" onclick="openHCPProfile(${p.id})">Profil HCP</button>
                         </div>
                     ` : `
                         <div class="card-actions-mini">
-                            <button class="btn-mini btn-mini-primary" onclick="openDirectMemoModal(${p.id})">Mémo Flash</button>
+                            <button class="btn-mini btn-mini-primary" onclick="openHCPProfile(${p.id})">Profil HCP</button>
                         </div>
                     `}
                 </div>
@@ -2133,16 +2204,25 @@
         listContainer.innerHTML = '';
         document.getElementById('dir-count').innerText = `Total : ${state.prospects.length} HCPs enregistrés`;
         state.prospects.forEach(p => {
+            const metrics = getHCPMetrics(p.id);
+
             const cardHTML = `
                 <div class="card" style="border-left:3px solid var(--accent); margin-bottom:6px;">
-                    <div class="card-header">
+                    <div class="card-header" style="cursor: pointer;" onclick="openHCPProfile(${p.id})">
                         <span class="card-title" style="color:var(--accent);">${p.nom}</span>
                         <span class="badge badge-pot">Classe ${p.potentiel}</span>
                     </div>
-                    <div class="card-meta"><b>${p.type}</b> — ${p.spec} | ${p.secteur}</div>
+                    <div class="card-meta" style="cursor: pointer;" onclick="openHCPProfile(${p.id})"><b>${p.type}</b> — ${p.spec} | ${p.secteur}</div>
+                    
+                    <div class="hcp-metrics-bar" onclick="openHCPProfile(${p.id})" style="cursor: pointer;">
+                        <span>Préc. : <b>${metrics.lastVisit}</b></span>
+                        <span>Proc. : <b>${metrics.nextVisit}</b></span>
+                        <span>Conf. : <b style="color:var(--success)">${metrics.ratio}</b></span>
+                    </div>
+
                     <div class="card-actions-mini">
                         <button class="btn-mini" onclick="openPlanVisitModal(${p.id}, false)">Planifier Visite</button>
-                        <button class="btn-mini btn-mini-primary" onclick="openDirectMemoModal(${p.id})">Mémo Flash</button>
+                        <button class="btn-mini btn-mini-primary" onclick="openHCPProfile(${p.id})">Profil HCP</button>
                     </div>
                 </div>
             `;
